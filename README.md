@@ -1,0 +1,2 @@
+# ClipboardEditor
+System clipboard editor
