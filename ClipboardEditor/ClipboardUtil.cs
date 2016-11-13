@@ -27,13 +27,19 @@ namespace ClipboardEditor
         private static extern bool SetClipboardData(uint uFormat, IntPtr data);
 
         [DllImport("user32.dll")]
+        private static extern bool EmptyClipboard();
+
+        [DllImport("user32.dll")]
         private static extern uint RegisterClipboardFormat(string lpszFormat);
 
         [DllImport("user32.dll")]
         private static extern bool IsClipboardFormatAvailable(uint uFormat);
 
         [DllImport("user32.dll")]
-        private static extern int GetClipboardFormatName(uint format, StringBuilder lpszFormatName, int cchMaxCount);
+        private static extern uint EnumClipboardFormats(uint format);
+
+        [DllImport("user32.dll")]
+        private static extern bool GetClipboardFormatName(uint format, StringBuilder lpszFormatName, int cchMaxCount);
 
         [DllImport("kernel32.dll")]
         private static extern IntPtr GlobalLock(IntPtr hMem);
@@ -45,41 +51,69 @@ namespace ClipboardEditor
         private static extern int GlobalSize(IntPtr hMem);
         #endregion
 
-        private static string GetClipboardFormatName(uint format)
+        private static uint[] GetClipboardFormats()
         {
-            StringBuilder name = new StringBuilder();
-            GetClipboardFormatName(format, name, name.MaxCapacity);
-            return name.ToString();
+            var formats = new List<uint>();
+
+            AccessClipboard(() =>
+            {
+                uint lastRetrievedFormat = 0;
+                while ((lastRetrievedFormat = EnumClipboardFormats(lastRetrievedFormat)) != 0)
+                {
+                    formats.Add(lastRetrievedFormat);
+                }
+            });
+
+            return formats.ToArray();
         }
 
-        private static uint GetFormatID(string format)
+        private static uint GetClipboardFormatID(string format)
         {
-            switch (format)
+            var dataFormat = DataFormats.GetDataFormat(format);
+            return (uint)dataFormat.Id;
+        }
+
+        private static string GetClipboardFormatName(uint format)
+        {
+            var dataFormat = DataFormats.GetDataFormat((int)format);
+            return dataFormat.Name;
+        }
+
+        public static Dictionary<string, string> GetData()
+        {
+            var dict = new Dictionary<string, string>();
+
+            var formats = GetClipboardFormats();
+            foreach (var format in formats)
             {
-                case Formats.TEXT:
-                    return CFConstants.CF_UNICODETEXT;
-
-                case Formats.METAFILE_PICTURE_FORMAT:
-                    return CFConstants.CF_METAFILEPICT;
-
-                case Formats.ENHANCED_METAFILE:
-                    return CFConstants.CF_ENHMETAFILE;
-
-                default:
-                    return RegisterClipboardFormat(format);
+                string name = GetClipboardFormatName(format);
+                try
+                {
+                    dict[name] = GetData(format);
+                }
+                catch (Exception e)
+                {
+                    dict[name] = e.Message;
+                }
             }
+
+            return dict;
         }
 
         public static string GetData(string format)
         {
-            byte[] buffer = null;
-
             // get the format ID
-            var formatID = GetFormatID(format);
+            var formatID = GetClipboardFormatID(format);
+            return GetData(formatID);
+        }
+
+        public static string GetData(uint format)
+        {
+            byte[] buffer = null;
 
             AccessClipboard(() =>
             {
-                var dataPtr = GetClipboardData(formatID);
+                var dataPtr = GetClipboardData(format);
                 buffer = GetBytes(dataPtr);
             });
 
@@ -88,15 +122,28 @@ namespace ClipboardEditor
                 return null;
             }
 
-            if (IsTextFormat(format))
+            string result;
+
+            switch (format)
             {
-                // text
-                var text = Encoding.Unicode.GetString(buffer).TrimEnd('\0');
-                return text;
+                case CFConstants.CF_TEXT:
+                case CFConstants.CF_OEMTEXT:
+                    // ascii text
+                    result = Encoding.ASCII.GetString(buffer).TrimEnd('\0');
+                    break;
+
+                case CFConstants.CF_UNICODETEXT:
+                    // unicode text
+                    result = Encoding.Unicode.GetString(buffer).TrimEnd('\0');
+                    break;
+
+                default:
+                    // binary
+                    result = Convert.ToBase64String(buffer);
+                    break;
             }
 
-            // binary
-            return Convert.ToBase64String(buffer);
+            return result;
         }
 
         private static byte[] GetBytes(IntPtr handle)
@@ -146,39 +193,6 @@ namespace ClipboardEditor
             }
         }
 
-        public static Dictionary<string, string> GetData()
-        {
-            var dict = new Dictionary<string, string>();
-
-            var dataObject = Clipboard.GetDataObject();
-            var formats = dataObject.GetFormats(false);
-
-            foreach (var format in formats)
-            {
-                object data = null;
-
-                try
-                {
-                    data = dataObject.GetData(format);
-                }
-                catch (Exception ex)
-                {
-                    data = ex.Message;
-                }
-
-                try
-                {
-                    dict[format] = ConvertToString(data);
-                }
-                catch (Exception ex)
-                {
-                    dict[format] = ex.Message;
-                }
-            }
-
-            return dict;
-        }
-
         public static void SetData(string format, string data)
         {
             IntPtr dataPtr;
@@ -200,7 +214,7 @@ namespace ClipboardEditor
             }
 
             // get the format ID
-            var formatID = GetFormatID(format);
+            var formatID = GetClipboardFormatID(format);
 
             AccessClipboard(() =>
             {
@@ -232,21 +246,15 @@ namespace ClipboardEditor
 
         public static void SetData(Dictionary<string, string> dict)
         {
-            var objDict = new Dictionary<string, object>();
+            Clipboard.Clear();
 
             foreach (var item in dict)
             {
                 var format = item.Key;
                 var data = item.Value;
 
-                if (CanBeIncluded(format))
-                {
-                    objDict[format] = ConvertFromString(format, data);
-                }
+                SetData(format, data);
             }
-
-            var dataObject = new ClipboardDataObject(objDict);
-            Clipboard.SetDataObject(dataObject, true);
         }
 
         private static bool CanBeIncluded(string format)
