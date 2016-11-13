@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Drawing.Imaging;
 using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading.Tasks;
 using System.Windows;
@@ -12,10 +13,137 @@ namespace ClipboardEditor
 {
     public class ClipboardUtil
     {
+        #region win32 APIs
+        [DllImport("user32.dll")]
+        private static extern bool OpenClipboard(IntPtr hWndNewOwner);
+
+        [DllImport("user32.dll")]
+        private static extern bool CloseClipboard();
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr GetClipboardData(uint uFormat);
+
+        [DllImport("user32.dll")]
+        private static extern bool SetClipboardData(uint uFormat, IntPtr data);
+
+        [DllImport("user32.dll")]
+        private static extern uint RegisterClipboardFormat(string lpszFormat);
+
+        [DllImport("user32.dll")]
+        private static extern bool IsClipboardFormatAvailable(uint uFormat);
+
+        [DllImport("user32.dll")]
+        private static extern int GetClipboardFormatName(uint format, StringBuilder lpszFormatName, int cchMaxCount);
+
+        [DllImport("kernel32.dll")]
+        private static extern IntPtr GlobalLock(IntPtr hMem);
+
+        [DllImport("kernel32.dll")]
+        private static extern bool GlobalUnlock(IntPtr hMem);
+
+        [DllImport("kernel32.dll")]
+        private static extern int GlobalSize(IntPtr hMem);
+        #endregion
+
+        private static string GetClipboardFormatName(uint format)
+        {
+            StringBuilder name = new StringBuilder();
+            GetClipboardFormatName(format, name, name.MaxCapacity);
+            return name.ToString();
+        }
+
+        private static uint GetFormatID(string format)
+        {
+            switch (format)
+            {
+                case Formats.TEXT:
+                    return CFConstants.CF_UNICODETEXT;
+
+                case Formats.METAFILE_PICTURE_FORMAT:
+                    return CFConstants.CF_METAFILEPICT;
+
+                case Formats.ENHANCED_METAFILE:
+                    return CFConstants.CF_ENHMETAFILE;
+
+                default:
+                    return RegisterClipboardFormat(format);
+            }
+        }
+
         public static string GetData(string format)
         {
-            var data = Clipboard.GetData(format);
-            return ConvertToString(data);
+            byte[] buffer = null;
+
+            // get the format ID
+            var formatID = GetFormatID(format);
+
+            AccessClipboard(() =>
+            {
+                var dataPtr = GetClipboardData(formatID);
+                buffer = GetBytes(dataPtr);
+            });
+
+            if (buffer == null)
+            {
+                return null;
+            }
+
+            if (IsTextFormat(format))
+            {
+                // text
+                var text = Encoding.Unicode.GetString(buffer).TrimEnd('\0');
+                return text;
+            }
+
+            // binary
+            return Convert.ToBase64String(buffer);
+        }
+
+        private static byte[] GetBytes(IntPtr handle)
+        {
+            if (handle == IntPtr.Zero)
+            {
+                return null;
+            }
+
+            // lock
+            var pointer = GlobalLock(handle);
+            if (pointer == IntPtr.Zero)
+            {
+                return null;
+            }
+
+            var size = GlobalSize(handle);
+            var buffer = new byte[size];
+
+            Marshal.Copy(pointer, buffer, 0, size);
+
+            // unlock
+            GlobalUnlock(handle);
+
+            return buffer;
+        }
+
+        private static void AccessClipboard(Action action)
+        {
+            if (!OpenClipboard(IntPtr.Zero))
+            {
+                // open clipboard failed
+                return;
+            }
+
+            try
+            {
+                action?.Invoke();
+            }
+            catch (Exception)
+            {
+                throw;
+            }
+            finally
+            {
+                CloseClipboard();
+            }
         }
 
         public static Dictionary<string, string> GetData()
@@ -53,8 +181,53 @@ namespace ClipboardEditor
 
         public static void SetData(string format, string data)
         {
-            var obj = ConvertFromString(format, data);
-            Clipboard.SetData(format, obj);
+            IntPtr dataPtr;
+
+            var obj = ToClipboardData(format, data);
+            if (obj is string)
+            {
+                dataPtr = Marshal.StringToHGlobalUni(obj as string);
+            }
+            else if (obj is byte[])
+            {
+                byte[] bytes = obj as byte[];
+                dataPtr = Marshal.AllocHGlobal(bytes.Length);
+                Marshal.Copy(bytes, 0, dataPtr, bytes.Length);
+            }
+            else
+            {
+                dataPtr = IntPtr.Zero;
+            }
+
+            // get the format ID
+            var formatID = GetFormatID(format);
+
+            AccessClipboard(() =>
+            {
+                SetClipboardData(formatID, dataPtr);
+            });
+
+            //Marshal.FreeHGlobal(dataPtr);
+        }
+
+        private static object ToClipboardData(string format, string data)
+        {
+            if (IsTextFormat(format))
+            {
+                return data;
+            }
+
+            try
+            {
+                byte[] bytes = Convert.FromBase64String(data);
+                return bytes;
+            }
+            catch (Exception)
+            {
+            }
+
+            // text if failed to be converted to stream
+            return data;
         }
 
         public static void SetData(Dictionary<string, string> dict)
@@ -142,6 +315,21 @@ namespace ClipboardEditor
 
             // by default
             return data.ToString();
+        }
+
+        private static bool IsTextFormat(string format)
+        {
+            if (format == Formats.TEXT
+                || format == "UnicodeText"
+                || format == "OEMText"
+                || format == "System.String"
+                || format == "Rich Text Format"
+                || format == "HTML Format")
+            {
+                return true;
+            }
+
+            return false;
         }
 
         public static object ConvertFromString(string format, string data)

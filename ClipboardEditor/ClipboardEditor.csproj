@@ -53,6 +53,7 @@
     <Reference Include="System.Xml" />
   </ItemGroup>
   <ItemGroup>
+    <Compile Include="CFConstants.cs" />
     <Compile Include="ClipboardDataObject.cs" />
     <Compile Include="ClipboardUtil.cs" />
     <Compile Include="Formats.cs" />
